@@ -96,6 +96,45 @@ class ZendeskClient:
     # 10 MB hard cap to guard against image bombs and token budget blowout.
     _MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 
+    # Keep redirects bounded and only permit Zendesk-owned attachment hosts.
+    _MAX_ATTACHMENT_REDIRECTS = 5
+
+    def _validate_attachment_url(self, url: str, *, initial: bool) -> str:
+        """Validate an attachment URL and return its normalized hostname.
+
+        The authenticated initial request must go to this account's exact
+        Zendesk hostname. Redirects may additionally go to Zendesk's
+        zdusercontent.com CDN, but credentials are never sent there.
+        """
+        try:
+            parsed = urllib.parse.urlsplit(url)
+            hostname = (parsed.hostname or "").rstrip(".").lower()
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError("Invalid attachment URL") from exc
+
+        if parsed.scheme.lower() != "https":
+            raise ValueError("Attachment URLs must use HTTPS")
+        if not hostname or parsed.username is not None or parsed.password is not None:
+            raise ValueError("Invalid attachment URL")
+        if port not in (None, 443):
+            raise ValueError("Attachment URLs must use the standard HTTPS port")
+
+        tenant_host = f"{self.subdomain.lower()}.zendesk.com"
+        if initial:
+            if hostname != tenant_host:
+                raise ValueError(
+                    f"Attachment URL must use the configured Zendesk host '{tenant_host}'"
+                )
+        elif not (
+            hostname == tenant_host
+            or hostname == "zdusercontent.com"
+            or hostname.endswith(".zdusercontent.com")
+        ):
+            raise ValueError("Attachment redirect target is not a trusted Zendesk host")
+
+        return hostname
+
     def get_ticket_attachment(self, content_url: str) -> Dict[str, Any]:
         """
         Fetch an image attachment and return base64-encoded data.
@@ -106,16 +145,45 @@ class ZendeskClient:
         - 10 MB size cap to prevent image bombs and excessive token usage.
 
         Zendesk attachment URLs redirect to zdusercontent.com (Zendesk's CDN).
-        requests strips the Authorization header on cross-origin redirects,
-        which is required — the CDN returns 403 if it receives an auth header.
+        The initial URL is restricted to this account's exact Zendesk host.
+        Redirects are followed manually and restricted to Zendesk's CDN.
+        The Authorization header is sent only to the tenant Zendesk host and
+        is never forwarded to the CDN or another redirect target.
         """
         try:
-            response = _requests.get(
-                content_url,
-                headers={'Authorization': self.auth_header},
-                timeout=30,
-                stream=True,
-            )
+            tenant_host = self._validate_attachment_url(content_url, initial=True)
+            current_url = content_url
+
+            for redirect_count in range(self._MAX_ATTACHMENT_REDIRECTS + 1):
+                current_host = self._validate_attachment_url(
+                    current_url,
+                    initial=(redirect_count == 0),
+                )
+                headers = (
+                    {'Authorization': self.auth_header}
+                    if current_host == tenant_host
+                    else {}
+                )
+                response = _requests.get(
+                    current_url,
+                    headers=headers,
+                    timeout=30,
+                    stream=True,
+                    allow_redirects=False,
+                )
+
+                if response.status_code not in (301, 302, 303, 307, 308):
+                    break
+
+                if redirect_count == self._MAX_ATTACHMENT_REDIRECTS:
+                    raise ValueError("Attachment redirect limit exceeded")
+                location = response.headers.get('Location')
+                if not location:
+                    raise ValueError("Attachment redirect did not include a Location header")
+                next_url = urllib.parse.urljoin(current_url, location)
+                self._validate_attachment_url(next_url, initial=False)
+                current_url = next_url
+
             response.raise_for_status()
 
             content_type = response.headers.get('Content-Type', '').split(';')[0].strip().lower()
