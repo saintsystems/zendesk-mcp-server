@@ -240,6 +240,52 @@ async def handle_list_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="search_tickets",
+            description="Search for Zendesk tickets using full-text search and filters. Builds a Zendesk search query from the provided parameters. All parameters are optional but at least one must be provided. Returns matching tickets with pagination support. Note: Zendesk search is rate-limited to ~1 request/second. Results are sorted by creation date (newest first).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Full-text search against subject, description, and comments"},
+                    "status": {"type": "string", "description": "Filter by status: new, open, pending, hold, solved, closed. Comma-separated for multiple."},
+                    "include_tags": {"type": "string", "description": "Comma-separated tags that MUST be present (e.g. \"gfdcrm,bug\")"},
+                    "exclude_tags": {"type": "string", "description": "Comma-separated tags that must NOT be present"},
+                    "priority": {"type": "string", "description": "Filter by priority: low, normal, high, urgent. Comma-separated for multiple."},
+                    "assignee": {"type": "string", "description": "Filter by assignee: \"none\" (unassigned), \"me\", or a name/email"},
+                    "organization": {"type": "string", "description": "Filter by organization name or ID"},
+                    "start_date": {"type": "string", "description": "Created on or after this date (YYYY-MM-DD)"},
+                    "end_date": {"type": "string", "description": "Created on or before this date (YYYY-MM-DD)"},
+                    "solved_start_date": {"type": "string", "description": "Solved on or after this date (YYYY-MM-DD)"},
+                    "solved_end_date": {"type": "string", "description": "Solved on or before this date (YYYY-MM-DD)"},
+                    "has_attachments": {"type": "boolean", "description": "true = only tickets with attachments"},
+                    "page_size": {"type": "integer", "description": "Results per page, 1-100 (default 100)", "default": 100},
+                    "after_cursor": {"type": "string", "description": "Cursor for pagination (from previous response's next_cursor)"},
+                },
+                "required": []
+            }
+        ),
+        types.Tool(
+            name="count_tickets",
+            description="Count Zendesk tickets matching the given filters without returning ticket data. Accepts the same filter parameters as search_tickets. Useful for quick checks like \"how many open tickets have the gfdcrm tag?\"",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "Full-text search against subject, description, and comments"},
+                    "status": {"type": "string", "description": "Filter by status: new, open, pending, hold, solved, closed. Comma-separated for multiple."},
+                    "include_tags": {"type": "string", "description": "Comma-separated tags that MUST be present"},
+                    "exclude_tags": {"type": "string", "description": "Comma-separated tags that must NOT be present"},
+                    "priority": {"type": "string", "description": "Filter by priority: low, normal, high, urgent. Comma-separated for multiple."},
+                    "assignee": {"type": "string", "description": "Filter by assignee: \"none\" (unassigned), \"me\", or a name/email"},
+                    "organization": {"type": "string", "description": "Filter by organization name or ID"},
+                    "start_date": {"type": "string", "description": "Created on or after this date (YYYY-MM-DD)"},
+                    "end_date": {"type": "string", "description": "Created on or before this date (YYYY-MM-DD)"},
+                    "solved_start_date": {"type": "string", "description": "Solved on or after this date (YYYY-MM-DD)"},
+                    "solved_end_date": {"type": "string", "description": "Solved on or before this date (YYYY-MM-DD)"},
+                    "has_attachments": {"type": "boolean", "description": "true = only tickets with attachments"},
+                },
+                "required": []
+            }
+        ),
+        types.Tool(
             name="update_ticket",
             description="Update fields on an existing Zendesk ticket (e.g., status, priority, assignee_id)",
             inputSchema={
@@ -353,6 +399,64 @@ async def handle_call_tool(
                     type="text",
                     text=json.dumps({"content_type": content_type, "data_base64": result["data"]})
                 )]
+
+        elif name == "search_tickets":
+            if not arguments or not any(
+                arguments.get(k) for k in [
+                    "text", "status", "include_tags", "exclude_tags", "priority",
+                    "assignee", "organization", "start_date", "end_date",
+                    "solved_start_date", "solved_end_date", "has_attachments",
+                ]
+            ):
+                raise ValueError("At least one search filter must be provided")
+            results = zendesk_client.search_tickets(
+                text=arguments.get("text"),
+                status=arguments.get("status"),
+                include_tags=arguments.get("include_tags"),
+                exclude_tags=arguments.get("exclude_tags"),
+                priority=arguments.get("priority"),
+                assignee=arguments.get("assignee"),
+                organization=arguments.get("organization"),
+                start_date=arguments.get("start_date"),
+                end_date=arguments.get("end_date"),
+                solved_start_date=arguments.get("solved_start_date"),
+                solved_end_date=arguments.get("solved_end_date"),
+                has_attachments=arguments.get("has_attachments"),
+                page_size=arguments.get("page_size", 100),
+                after_cursor=arguments.get("after_cursor"),
+            )
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(results, indent=2)
+            )]
+
+        elif name == "count_tickets":
+            if not arguments or not any(
+                arguments.get(k) for k in [
+                    "text", "status", "include_tags", "exclude_tags", "priority",
+                    "assignee", "organization", "start_date", "end_date",
+                    "solved_start_date", "solved_end_date", "has_attachments",
+                ]
+            ):
+                raise ValueError("At least one search filter must be provided")
+            results = zendesk_client.count_tickets(
+                text=arguments.get("text"),
+                status=arguments.get("status"),
+                include_tags=arguments.get("include_tags"),
+                exclude_tags=arguments.get("exclude_tags"),
+                priority=arguments.get("priority"),
+                assignee=arguments.get("assignee"),
+                organization=arguments.get("organization"),
+                start_date=arguments.get("start_date"),
+                end_date=arguments.get("end_date"),
+                solved_start_date=arguments.get("solved_start_date"),
+                solved_end_date=arguments.get("solved_end_date"),
+                has_attachments=arguments.get("has_attachments"),
+            )
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(results, indent=2)
+            )]
 
         elif name == "update_ticket":
             if not arguments:

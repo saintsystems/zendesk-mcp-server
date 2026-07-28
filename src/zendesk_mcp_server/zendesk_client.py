@@ -334,6 +334,191 @@ class ZendeskClient:
         except Exception as e:
             raise Exception(f"Failed to create ticket: {str(e)}")
 
+    @staticmethod
+    def _build_search_query(
+        text: str | None = None,
+        status: str | None = None,
+        include_tags: str | None = None,
+        exclude_tags: str | None = None,
+        priority: str | None = None,
+        assignee: str | None = None,
+        organization: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        solved_start_date: str | None = None,
+        solved_end_date: str | None = None,
+        has_attachments: bool | None = None,
+    ) -> str:
+        """Build a Zendesk search query string from structured parameters."""
+        parts = ["type:ticket"]
+
+        if text:
+            parts.append(f'"{text}"')
+        if status:
+            for s in status.split(","):
+                parts.append(f"status:{s.strip()}")
+        if include_tags:
+            for tag in include_tags.split(","):
+                parts.append(f"tags:{tag.strip()}")
+        if exclude_tags:
+            for tag in exclude_tags.split(","):
+                parts.append(f"-tags:{tag.strip()}")
+        if priority:
+            for p in priority.split(","):
+                parts.append(f"priority:{p.strip()}")
+        if assignee:
+            parts.append(f"assignee:{assignee}")
+        if organization:
+            parts.append(f"organization:{organization}")
+        if start_date:
+            parts.append(f"created>{start_date}")
+        if end_date:
+            parts.append(f"created<{end_date}")
+        if solved_start_date:
+            parts.append(f"solved>{solved_start_date}")
+        if solved_end_date:
+            parts.append(f"solved<{solved_end_date}")
+        if has_attachments:
+            parts.append("has_attachment:true")
+
+        return " ".join(parts)
+
+    def search_tickets(
+        self,
+        text: str | None = None,
+        status: str | None = None,
+        include_tags: str | None = None,
+        exclude_tags: str | None = None,
+        priority: str | None = None,
+        assignee: str | None = None,
+        organization: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        solved_start_date: str | None = None,
+        solved_end_date: str | None = None,
+        has_attachments: bool | None = None,
+        page_size: int = 100,
+        after_cursor: str | None = None,
+    ) -> Dict[str, Any]:
+        """Search for Zendesk tickets using the search API."""
+        query = self._build_search_query(
+            text=text, status=status, include_tags=include_tags,
+            exclude_tags=exclude_tags, priority=priority, assignee=assignee,
+            organization=organization, start_date=start_date, end_date=end_date,
+            solved_start_date=solved_start_date, solved_end_date=solved_end_date,
+            has_attachments=has_attachments,
+        )
+
+        page_size = min(max(page_size, 1), 100)
+        params: Dict[str, str] = {
+            "query": query,
+            "per_page": str(page_size),
+            "sort_by": "created_at",
+            "sort_order": "desc",
+        }
+        if after_cursor:
+            params["page[after]"] = after_cursor
+
+        query_string = urllib.parse.urlencode(params)
+        url = f"{self.base_url}/search.json?{query_string}"
+
+        try:
+            req = urllib.request.Request(url)
+            req.add_header("Authorization", self.auth_header)
+            req.add_header("Content-Type", "application/json")
+
+            with urllib.request.urlopen(req) as response:
+                data = json.loads(response.read().decode())
+
+            tickets = []
+            for t in data.get("results", []):
+                desc = t.get("description") or ""
+                tickets.append({
+                    "id": t.get("id"),
+                    "subject": t.get("subject"),
+                    "description": desc[:200],
+                    "status": t.get("status"),
+                    "priority": t.get("priority"),
+                    "tags": t.get("tags", []),
+                    "created_at": t.get("created_at"),
+                    "updated_at": t.get("updated_at"),
+                    "requester_id": t.get("requester_id"),
+                    "assignee_id": t.get("assignee_id"),
+                    "organization_id": t.get("organization_id"),
+                })
+
+            meta = data.get("meta", {})
+            links = data.get("links", {})
+            has_more = meta.get("has_more", False)
+            next_cursor = meta.get("after_cursor") if has_more else None
+            # Fallback for offset-based pagination responses
+            if not has_more and "next_page" in data:
+                has_more = data["next_page"] is not None
+
+            return {
+                "tickets": tickets,
+                "total_count": data.get("count", len(tickets)),
+                "has_more": has_more,
+                "next_cursor": next_cursor,
+            }
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode() if e.fp else "No response body"
+            if e.code == 429:
+                retry_after = e.headers.get("Retry-After", "unknown")
+                raise Exception(f"Rate limited by Zendesk. Retry after {retry_after} seconds.")
+            raise Exception(f"Search failed: HTTP {e.code} - {e.reason}. {error_body}")
+        except Exception as e:
+            if "Rate limited" in str(e):
+                raise
+            raise Exception(f"Failed to search tickets: {str(e)}")
+
+    def count_tickets(
+        self,
+        text: str | None = None,
+        status: str | None = None,
+        include_tags: str | None = None,
+        exclude_tags: str | None = None,
+        priority: str | None = None,
+        assignee: str | None = None,
+        organization: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        solved_start_date: str | None = None,
+        solved_end_date: str | None = None,
+        has_attachments: bool | None = None,
+    ) -> Dict[str, int]:
+        """Count Zendesk tickets matching the given filters."""
+        query = self._build_search_query(
+            text=text, status=status, include_tags=include_tags,
+            exclude_tags=exclude_tags, priority=priority, assignee=assignee,
+            organization=organization, start_date=start_date, end_date=end_date,
+            solved_start_date=solved_start_date, solved_end_date=solved_end_date,
+            has_attachments=has_attachments,
+        )
+
+        query_string = urllib.parse.urlencode({"query": query})
+        url = f"{self.base_url}/search/count.json?{query_string}"
+
+        try:
+            req = urllib.request.Request(url)
+            req.add_header("Authorization", self.auth_header)
+            req.add_header("Content-Type", "application/json")
+
+            with urllib.request.urlopen(req) as response:
+                data = json.loads(response.read().decode())
+
+            return {"count": data.get("count", 0)}
+        except urllib.error.HTTPError as e:
+            error_body = e.read().decode() if e.fp else "No response body"
+            if e.code == 429:
+                retry_after = e.headers.get("Retry-After", "unknown")
+                raise Exception(f"Rate limited by Zendesk. Retry after {retry_after} seconds.")
+            raise Exception(f"Count failed: HTTP {e.code} - {e.reason}. {error_body}")
+        except Exception as e:
+            if "Rate limited" in str(e):
+                raise
+            raise Exception(f"Failed to count tickets: {str(e)}")
+
     def update_ticket(self, ticket_id: int, **fields: Any) -> Dict[str, Any]:
         """
         Update a Zendesk ticket with provided fields using Zenpy.
