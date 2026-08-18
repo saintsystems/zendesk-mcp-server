@@ -1,5 +1,7 @@
 from typing import Dict, Any, List
+import html
 import json
+import re
 import urllib.request
 import urllib.parse
 import base64
@@ -226,6 +228,24 @@ class ZendeskClient:
         except Exception as e:
             raise Exception(f"Failed to fetch attachment from {content_url}: {str(e)}")
 
+    @staticmethod
+    def _to_html_body(comment: str) -> str:
+        """
+        Zendesk renders html_body as HTML, so plain-text newlines collapse.
+        If the comment contains no HTML tags, wrap blank-line-separated
+        paragraphs in <p> and turn single newlines into <br>. Comments that
+        already contain HTML pass through untouched.
+        """
+        known_tags = r'</?(?:p|br|div|span|a|ul|ol|li|strong|em|b|i|u|h[1-6]|blockquote|pre|code|table|tr|td|th|img|hr)\b[^>]*>'
+        if re.search(known_tags, comment, re.IGNORECASE):
+            return comment
+
+        paragraphs = re.split(r'\n\s*\n', comment.strip())
+        return ''.join(
+            '<p>' + html.escape(p).replace('\n', '<br>') + '</p>'
+            for p in paragraphs if p.strip()
+        )
+
     def post_comment(self, ticket_id: int, comment: str, public: bool = True) -> str:
         """
         Post a comment to an existing ticket.
@@ -233,7 +253,7 @@ class ZendeskClient:
         try:
             ticket = self.client.tickets(id=ticket_id)
             ticket.comment = Comment(
-                html_body=comment,
+                html_body=self._to_html_body(comment),
                 public=public
             )
             self.client.tickets.update(ticket)
